@@ -4,7 +4,6 @@ import com.redislabs.provider.redis.RedisConfig
 import com.redislabs.provider.redis.util.CollectionUtils.RichCollection
 import com.redislabs.provider.redis.util.ConnectionUtils.{JedisExt, XINFO, withConnection}
 import com.redislabs.provider.redis.util.StreamUtils.{createConsumerGroupIfNotExist, resetConsumerGroup}
-import com.redislabs.provider.redis.util.{ConnectionUtils, Logging, ParseUtils}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.streaming.{Offset, Source}
 import org.apache.spark.sql.redis.stream.RedisSource._
@@ -12,6 +11,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, SQLContext}
 import org.apache.spark.unsafe.types.UTF8String
 import redis.clients.jedis.{StreamEntryID, Jedis}
+import com.redislabs.provider.redis.util.{Logging, ParseUtils}
 
 import scala.collection.JavaConverters._
 import scala.util.Try
