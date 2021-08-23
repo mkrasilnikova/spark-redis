@@ -5,7 +5,10 @@ import com.redislabs.provider.redis.util.ConnectionUtils.withConnection
 import com.redislabs.provider.redis.util.PipelineUtils._
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
+import redis.clients.jedis.PipelineBase
+
 import scala.collection.JavaConversions.mapAsJavaMap
+import collection.JavaConverters._
 
 /**
   * RedisContext extends sparkContext's functionality with redis functions
@@ -83,6 +86,24 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
   }
 
   /**
+   * @param keysOrKeyPattern an array of keys or a key pattern
+   * @param partitionNum     number of partitions
+   * @return RedisListsRDD of related values stored in redis server
+   */
+  def fromRedisLists[T](keysOrKeyPattern: T,
+                       partitionNum: Int = 3)
+                      (implicit
+                       redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                       readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)):
+  RDD[(String, Seq[String])] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getLists()
+      case keys: Array[String] => fromRedisKeys(keys, partitionNum).getLists()
+      case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
+    }
+  }
+
+  /**
     * @param keysOrKeyPattern an array of keys or a key pattern
     * @param partitionNum     number of partitions
     * @return RedisZSetRDD of Keys in related ZSets stored in redis server
@@ -96,6 +117,24 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
     keysOrKeyPattern match {
       case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getSet()
       case keys: Array[String] => fromRedisKeys(keys, partitionNum).getSet()
+      case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
+    }
+  }
+
+  /**
+   * @param keysOrKeyPattern an array of keys or a key pattern
+   * @param partitionNum     number of partitions
+   * @return RedisListsRDD of related values stored in redis server
+   */
+  def fromRedisSets[T](keysOrKeyPattern: T,
+                      partitionNum: Int = 3)
+                     (implicit
+                      redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                      readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)):
+  RDD[(String, Seq[String])] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getSets()
+      case keys: Array[String] => fromRedisKeys(keys, partitionNum).getSets()
       case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
     }
   }
@@ -117,6 +156,25 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
       case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
     }
   }
+
+  /**
+   * @param keysOrKeyPattern an array of keys or a key pattern
+   * @param partitionNum     number of partitions
+   * @return RedisHashesRDD of related Key-Values stored in redis server
+   */
+  def fromRedisHashes[T](keysOrKeyPattern: T,
+                       partitionNum: Int = 3)
+                      (implicit
+                       redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                       readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)):
+  RDD[(String, Map[String, String])] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getHashes()
+      case keys: Array[String] => fromRedisKeys(keys, partitionNum).getHashes()
+      case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
+    }
+  }
+
 
   /**
     * @param keysOrKeyPattern an array of keys or a key pattern
@@ -150,6 +208,24 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
     keysOrKeyPattern match {
       case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getZSetWithScore()
       case keys: Array[String] => fromRedisKeys(keys, partitionNum).getZSetWithScore()
+      case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
+    }
+  }
+
+  /**
+   * @param keysOrKeyPattern an array of keys or a key pattern
+   * @param partitionNum     number of partitions
+   * @return RedisZSetsRDD of related Key-Scores stored in redis server
+   */
+  def fromRedisZSetsWithScore[T](keysOrKeyPattern: T,
+                                partitionNum: Int = 3)
+                               (implicit
+                                redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                                readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)):
+  RDD[(String, Seq[(String, Double)])] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => fromRedisKeyPattern(keyPattern, partitionNum).getZSetsWithScore()
+      case keys: Array[String] => fromRedisKeys(keys, partitionNum).getZSetsWithScore()
       case _ => throw new scala.Exception(IncorrectKeysOrKeyPatternMsg)
     }
   }
@@ -279,6 +355,19 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
   }
 
   /**
+   * Write RDD of (zset name, zset KVs)
+   *
+   * @param kvs      RDD of tuples (zset name, Map(zset value, zset score))
+   * @param ttl      time to live
+   */
+  def toRedisZsets(kvs: RDD[(String, Map[String, String])], ttl: Int = 0)
+                   (implicit
+                    redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                    readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
+    kvs.foreachPartition(partition => setZset(partition, ttl, redisConfig, readWriteConfig))
+  }
+
+  /**
     * @param kvs      Pair RDD of K/V
     * @param zsetName target zset's name which hold all the kvs
     * @param ttl      time to live
@@ -300,6 +389,19 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
                  redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
                  readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
     vs.foreachPartition(partition => setSet(setName, partition, ttl, redisConfig, readWriteConfig))
+  }
+
+  /**
+   * Write RDD of (set name, set values) to Redis sets.
+   *
+   * @param rdd RDD of tuples (set name, set values)
+   * @param ttl time to live
+   */
+  def toRedisSets(rdd: RDD[(String, Seq[String])], ttl: Int = 0)
+                  (implicit
+                   redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                   readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
+    rdd.foreachPartition(partition => setSet(partition, ttl, redisConfig, readWriteConfig))
   }
 
   /**
@@ -369,6 +471,79 @@ class RedisContext(@transient val sc: SparkContext) extends Serializable {
                        redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
                        readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
     vs.foreachPartition(partition => setFixedList(listName, listSize, partition, redisConfig, readWriteConfig))
+  }
+
+  /**
+   * @param setName
+   * @param ttl time to live
+   */
+  def renameKeys(setName: String, ttl: Int = 0)
+                (implicit  redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                 readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
+    val conn = redisConfig.connectionForKey(setName)
+    val keys = conn.smembers(setName).iterator().asScala
+    val newSetName = setName.substring(1)
+    val pipeline = foreachWithPipelineNoLastSync(conn, keys) { (pipeline, v) =>
+      val newName = v.substring(1)
+      pipeline.rename(v, newName)
+      pipeline.sadd(newSetName, newName)
+    }
+    (pipeline: PipelineBase).del(setName)
+    if (ttl > 0) pipeline.expire(newSetName, ttl)
+    pipeline.sync()
+    conn.close()
+  }
+
+  /**
+   * @param key
+   * @param ttl time to live
+   */
+  def renameKey(key: String, ttl: Int = 0)
+                (implicit  redisConfig: RedisConfig = RedisConfig.fromSparkConf(sc.getConf),
+                 readWriteConfig: ReadWriteConfig = ReadWriteConfig.fromSparkConf(sc.getConf)) {
+    val conn = redisConfig.connectionForKey(key)
+    conn.rename(key, key.substring(1))
+    conn.close()
+  }
+
+  /**
+   * @param setName
+   */
+  def deleteKeys(setName: String, redisConfig: RedisConfig,
+                 readWriteConfig: ReadWriteConfig) {
+    implicit val rwConf: ReadWriteConfig = readWriteConfig
+    val conn = redisConfig.connectionForKey(setName)
+    val keys = conn.smembers(setName).iterator().asScala
+
+    val pipeline = foreachWithPipelineNoLastSync(conn, keys) { (pipeline, v) =>
+      (pipeline: PipelineBase).del(v)
+    }
+    (pipeline: PipelineBase).del(setName)
+    pipeline.sync()
+    conn.close()
+  }
+
+  /**
+   * @param key
+   */
+  def deleteKey(key: String, redisConfig: RedisConfig,
+                 readWriteConfig: ReadWriteConfig) {
+    implicit val rwConf: ReadWriteConfig = readWriteConfig
+    val conn = redisConfig.connectionForKey(key)
+    conn.del(key)
+    conn.close()
+  }
+
+  /**
+   * @param key
+   */
+  def keyExists(key: String, redisConfig: RedisConfig,
+                readWriteConfig: ReadWriteConfig) : Boolean = {
+    implicit val rwConf: ReadWriteConfig = readWriteConfig
+    val conn = redisConfig.connectionForKey(key)
+    val exists = conn.exists(key)
+    conn.close()
+    exists
   }
 }
 
@@ -461,6 +636,35 @@ object RedisContext extends Serializable {
   }
 
   /**
+   * @param hashes zsetName: map of k/vs to be saved in the target host
+   * @param ttl time to live
+   */
+  def setZset(zsets: Iterator[(String, Map[String,String])],
+              ttl: Int,
+              redisConfig: RedisConfig,
+              readWriteConfig: ReadWriteConfig) {
+    implicit val rwConf: ReadWriteConfig = readWriteConfig
+
+    zsets
+      .map { case (key, hashFields) =>
+        (redisConfig.getHost(key), (key, hashFields))
+      }
+      .toArray
+      .groupBy(_._1)
+      .foreach { case (node, arr) =>
+        withConnection(node.endpoint.connect()) { conn =>
+          foreachWithPipeline(conn, arr) {
+            (pipeline, a) =>
+            val (key, valWithScoresStr) = a._2
+              val valWithScores = valWithScoresStr.transform((key,value) => new java.lang.Double(value.toDouble))
+              pipeline.zadd(key, valWithScores)
+            if (ttl > 0) pipeline.expire(key, ttl)
+          }
+        }
+      }
+  }
+
+  /**
     * @param setName
     * @param arr values which should be saved in the target host
     *            save all the values to setName(set type) to the target host
@@ -517,6 +721,29 @@ object RedisContext extends Serializable {
           foreachWithPipeline(conn, arr) { (pipeline, a) =>
             val (key, listVals) = a._2
             pipeline.rpush(key, listVals: _*)
+            if (ttl > 0) pipeline.expire(key, ttl)
+          }
+        }
+      }
+  }
+
+  def setSet(keyValues: Iterator[(String, Seq[String])],
+              ttl: Int,
+              redisConfig: RedisConfig,
+              readWriteConfig: ReadWriteConfig) {
+    implicit val rwConf: ReadWriteConfig = readWriteConfig
+
+    keyValues
+      .map { case (key, setValues) =>
+        (redisConfig.getHost(key), (key, setValues))
+      }
+      .toArray
+      .groupBy(_._1)
+      .foreach { case (node, arr) =>
+        withConnection(node.endpoint.connect()) { conn =>
+          foreachWithPipeline(conn, arr) { (pipeline, a) =>
+            val (key, setVals) = a._2
+            pipeline.sadd(key, setVals: _*)
             if (ttl > 0) pipeline.expire(key, ttl)
           }
         }

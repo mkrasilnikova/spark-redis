@@ -17,11 +17,11 @@ trait RedisRddSuite extends SparkRedisSuite with Keys with Matchers {
   val content: String = fromInputStream(getClass.getClassLoader.getResourceAsStream("blog"))
     .getLines.toArray.mkString("\n")
 
-  val contentWords: Array[String] = content.split("\\W+").filter(_.nonEmpty)
+  val contentWords: Array[String] = content.split("\\W+").filter(_.nonEmpty).map(w =>"_"+w)
   val zSetKey: String = "all:words:cnt:sortedset"
   val hashKey: String = "all:words:cnt:hash"
   val listKey: String = "all:words:list"
-  val setKey: String = "all:words:set"
+  val setKey: String = "_all:words:set"
   val missingRedisKey: String = "missingRedisKey"
 
   override def beforeAll() {
@@ -61,7 +61,6 @@ trait RedisRddSuite extends SparkRedisSuite with Keys with Matchers {
     all(wrongTypeKeysRes) should have size 0
     missingKeyRes should have size 0
   }
-
   test("RedisZsetRDD") {
     val redisZSetWithScore = sc.fromRedisZSetWithScore(zSetKey)
     val zsetWithScore = redisZSetWithScore.sortByKey().collect
@@ -149,6 +148,22 @@ trait RedisRddSuite extends SparkRedisSuite with Keys with Matchers {
     sc.toRedisSET(wds, prefix + setKey, expireTime)
     Thread.sleep(expireTime * 1000 + 1)
     sc.fromRedisKeyPattern(prefix + "*").count should be(0)
+  }
+
+  test("RenameKeys") {
+    val redisSetRDD = sc.fromRedisSet(setKey)
+    val setContents = redisSetRDD.sortBy(x => x).collect
+
+    sc.renameKeys(setKey)
+    val redisSetRDD1 = sc.fromRedisSet(setKey.substring(1))
+    val setContents1 = redisSetRDD1.sortBy(x => x).collect
+
+    val ws = content.split("\\W+").filter(!_.isEmpty).distinct.sorted.map(w => "_"+w)
+    val ws1 = content.split("\\W+").filter(!_.isEmpty).distinct.sorted
+
+    setContents should be(ws)
+    setContents1 should be(ws1)
+
   }
 
 }

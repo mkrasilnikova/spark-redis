@@ -65,13 +65,10 @@ object ConnectionPool {
         case e: JedisConnectionException if e.getCause.toString.contains("ERR max number of clients reached") =>
           if (sleepTime < 500) sleepTime *= 2
           Thread.sleep(sleepTime)
+        case e: Exception => throw e
       }
-      case e: Exception => throw e
     }
+    conn
   }
-
-  conn
-}
-
 }
 

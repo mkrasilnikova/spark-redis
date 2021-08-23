@@ -1,14 +1,13 @@
 package com.redislabs.provider.redis.rdd
 
 import java.util
-
 import com.redislabs.provider.redis.partitioner._
 import com.redislabs.provider.redis.util.ParseUtils.ignoreJedisWrongTypeException
 import com.redislabs.provider.redis.util.PipelineUtils.mapWithPipeline
 import com.redislabs.provider.redis.{ReadWriteConfig, RedisConfig, RedisNode}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
-import redis.clients.jedis.{Jedis, ScanParams}
+import redis.clients.jedis.{Jedis, ScanParams, Tuple}
 import redis.clients.jedis.util.JedisClusterCRC16
 
 import scala.collection.JavaConversions._
@@ -46,9 +45,9 @@ class RedisKVRDD(prev: RDD[String],
       }
 
       val res = nodeKeys.zip(response)
-        .flatMap{
+        .flatMap {
           case (_, e: Throwable) => Some(Failure(e))
-          case (k, v: String) => Some(Success((k,v)))
+          case (k, v: String) => Some(Success((k, v)))
           case _ => None
         }.flatMap(ignoreJedisWrongTypeException(_).get) // Unwrap `Try` to throw exceptions if any
         .iterator
@@ -61,9 +60,43 @@ class RedisKVRDD(prev: RDD[String],
   def getHASH(nodes: Array[RedisNode], keys: Iterator[String]): Iterator[(String, String)] = {
     groupKeysByNode(nodes, keys).flatMap { case (node, nodeKeys) =>
       val conn = node.endpoint.connect()
-      val res = nodeKeys.flatMap{k =>
+      val res = nodeKeys.flatMap { k =>
         ignoreJedisWrongTypeException(Try(conn.hgetAll(k).toMap)).get
       }.flatten.iterator
+      conn.close()
+      res
+    }
+  }
+}
+class RedisHashesRDD(prev: RDD[String],
+                 implicit val readWriteConfig: ReadWriteConfig)
+  extends RDD[(String, Map[String, String])](prev) with Keys {
+
+  override def getPartitions: Array[Partition] = prev.partitions
+
+  override def compute(split: Partition, context: TaskContext): Iterator[(String, Map[String, String])] = {
+    val partition: RedisPartition = split.asInstanceOf[RedisPartition]
+    val sPos = partition.slots._1
+    val ePos = partition.slots._2
+    val nodes = partition.redisConfig.getNodesBySlots(sPos, ePos)
+    val keys = firstParent[String].iterator(split, context)
+    getHASHes(nodes, keys)
+  }
+
+  def getHASHes(nodes: Array[RedisNode], keys: Iterator[String]): Iterator[(String, Map[String, String])] = {
+    groupKeysByNode(nodes, keys).flatMap { case (node, nodeKeys) =>
+      val conn = node.endpoint.connect()
+      val response = mapWithPipeline(conn, nodeKeys) { (pipeline, key) =>
+        pipeline.hgetAll(key)
+      }
+      val res = nodeKeys.zip(response)
+        .flatMap {
+          case (_, e: Throwable) => Some(Failure(e))
+          case (hk:String, v) =>
+            Some(Success(hk, v.asInstanceOf[java.util.Map[String, String]].toMap))
+          case _ => None
+        }.flatMap(ignoreJedisWrongTypeException(_).get) // Unwrap `Try` to throw exceptions if any
+        .iterator
       conn.close()
       res
     }
@@ -106,6 +139,67 @@ class RedisListRDD(prev: RDD[String],
       val res = nodeKeys.flatMap{ k =>
         ignoreJedisWrongTypeException(Try(conn.lrange(k, 0, -1))).get
       }.flatten.iterator
+      conn.close()
+      res
+    }
+  }
+}
+
+class RedisListsRDD(prev: RDD[String],
+                   val rddType: String,
+                   implicit val readWriteConfig: ReadWriteConfig) extends RDD[(String, Seq[String])](prev) with Keys {
+
+  override def getPartitions: Array[Partition] = prev.partitions
+
+  override def compute(split: Partition, context: TaskContext): Iterator[(String, Seq[String])] = {
+    val partition: RedisPartition = split.asInstanceOf[RedisPartition]
+    val sPos = partition.slots._1
+    val ePos = partition.slots._2
+    val nodes = partition.redisConfig.getNodesBySlots(sPos, ePos)
+    val keys = firstParent[String].iterator(split, context)
+    rddType match {
+      case "sets" => getSETs(nodes, keys)
+      case "lists" => getLISTs(nodes, keys)
+    }
+  }
+
+  def getLISTs(nodes: Array[RedisNode], keys: Iterator[String]): Iterator[(String, Seq[String])] = {
+    groupKeysByNode(nodes, keys).flatMap { case (node, nodeKeys) =>
+      val conn = node.endpoint.connect()
+
+      val response = mapWithPipeline(conn, nodeKeys) { (pipeline, key) =>
+        pipeline.lrange(key, 0, -1)
+      }
+      val res = nodeKeys.zip(response)
+        .flatMap {
+          case (_, e: Throwable) => Some(Failure(e))
+          case (hk:String, v) =>
+            Some(Success(hk, v.asInstanceOf[java.util.List[String]].toSeq))
+          case _ => None
+        }.flatMap(ignoreJedisWrongTypeException(_).get) // Unwrap `Try` to throw exceptions if any
+        .iterator
+
+      conn.close()
+      res
+    }
+  }
+
+  def getSETs(nodes: Array[RedisNode], keys: Iterator[String]): Iterator[(String, Seq[String])] = {
+    groupKeysByNode(nodes, keys).flatMap { case (node, nodeKeys) =>
+      val conn = node.endpoint.connect()
+
+      val response = mapWithPipeline(conn, nodeKeys) { (pipeline, key) =>
+        pipeline.smembers(key)
+      }
+      val res = nodeKeys.zip(response)
+        .flatMap {
+          case (_, e: Throwable) => Some(Failure(e))
+          case (hk:String, v) =>
+            Some(Success(hk, v.asInstanceOf[java.util.Set[String]].toSeq))
+          case _ => None
+        }.flatMap(ignoreJedisWrongTypeException(_).get) // Unwrap `Try` to throw exceptions if any
+        .iterator
+
       conn.close()
       res
     }
@@ -190,6 +284,48 @@ class RedisZSetRDD[T: ClassTag](prev: RDD[String],
       conn.close()
       res
     }.asInstanceOf[Iterator[T]]
+  }
+}
+
+class RedisZSetsRDD(prev: RDD[String],
+                                zsetContext: ZSetContext,
+                                implicit val readWriteConfig: ReadWriteConfig)
+  extends RDD[(String,Seq[(String, Double)])](prev) with Keys {
+
+  override def getPartitions: Array[Partition] = prev.partitions
+
+  override def compute(split: Partition, context: TaskContext): Iterator[(String,Seq[(String, Double)])] = {
+    val partition: RedisPartition = split.asInstanceOf[RedisPartition]
+    val sPos = partition.slots._1
+    val ePos = partition.slots._2
+    val nodes = partition.redisConfig.getNodesBySlots(sPos, ePos)
+    val keys = firstParent[String].iterator(split, context)
+    val auth = partition.redisConfig.getAuth
+    val db = partition.redisConfig.getDB
+    getZSetsByRange(nodes, keys, zsetContext.startPos, zsetContext.endPos)
+  }
+
+  private def getZSetsByRange(nodes: Array[RedisNode],
+                             keys: Iterator[String],
+                             startPos: Long,
+                             endPos: Long): Iterator[(String,Seq[(String, Double)])] = {
+    groupKeysByNode(nodes, keys).flatMap { case (node, nodeKeys) =>
+      val conn = node.endpoint.connect()
+        val response = mapWithPipeline(conn, nodeKeys) { (pipeline, key) =>
+          pipeline.zrangeWithScores(key, startPos, endPos)
+        }
+        val res = nodeKeys.zip(response)
+          .flatMap {
+            case (_, e: Throwable) => Some(Failure(e))
+            case (hk: String, v) =>
+              Some(Success(hk,
+                v.asInstanceOf[java.util.Set[Tuple]].map(tup => (tup.getElement, tup.getScore)).toSeq))
+            case _ => None
+          }.flatMap(ignoreJedisWrongTypeException(_).get) // Unwrap `Try` to throw exceptions if any
+          .iterator
+      conn.close()
+      res
+    }
   }
 }
 
@@ -294,12 +430,30 @@ class RedisKeysRDD(sc: SparkContext,
   }
 
   /**
+   * filter the 'sets' type keys and get all the elements of them
+   *
+   * @return RedisSetRDD[String]
+   */
+  def getSets(): RDD[(String, Seq[String])] = {
+    new RedisListsRDD(this, "sets", readWriteConfig)
+  }
+
+  /**
     * filter the 'list' type keys and get all the elements of them
     *
     * @return RedisListRDD[String]
     */
   def getList(): RDD[String] = {
     new RedisListRDD(this, "list", readWriteConfig)
+  }
+
+  /**
+   * filter the 'list' type keys and get all the elements of them
+   *
+   * @return RedisListRDD[String]
+   */
+  def getLists(): RDD[(String, Seq[String])] = {
+    new RedisListsRDD(this, "lists", readWriteConfig)
   }
 
   /**
@@ -321,6 +475,14 @@ class RedisKeysRDD(sc: SparkContext,
   }
 
   /**
+   * filter the 'hash' type keys and get all the elements of them
+   *
+   * @return RedisHashRDD[(String, String)]
+   */
+  def getHashes(): RDD[(String, Map[String, String])] = {
+    new RedisHashesRDD(this, readWriteConfig)
+  }
+  /**
     * filter the 'zset' type keys and get all the elements(without scores) of them
     *
     * @return RedisZSetRDD[String]
@@ -338,6 +500,16 @@ class RedisKeysRDD(sc: SparkContext,
   def getZSetWithScore(): RDD[(String, Double)] = {
     val zsetContext: ZSetContext = new ZSetContext(0, -1, Double.MinValue, Double.MaxValue, true, "byRange")
     new RedisZSetRDD(this, zsetContext, classOf[(String, Double)], readWriteConfig)
+  }
+
+  /**
+   * filter the 'zset' type keys and get all the elements(with scores) of them
+   *
+   * @return RedisZSetRDD[(String, Double)]
+   */
+  def getZSetsWithScore(): RDD[(String,Seq[(String, Double)])] = {
+    val zsetContext: ZSetContext = new ZSetContext(0, -1, Double.MinValue, Double.MaxValue, true, "byRange")
+    new RedisZSetsRDD(this, zsetContext, readWriteConfig)
   }
 
   /**
